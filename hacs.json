@@ -1,8 +1,8 @@
 {
-    "name": "Світло",
+    "name": "Svitlo KREM",
     "content_in_root": false,
     "domains": [
-        "svitlo_ua"
+        "svitlo_krem"
     ],
     "country": "ua",
     "homeassistant": "2023.1.0",
