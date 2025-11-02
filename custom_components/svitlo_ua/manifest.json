@@ -3,7 +3,7 @@
   "name": "Svitlo UA Power Outages",
   "version": "1.0.0",
   "config_flow": true,
-  "documentation": "https://github.com/yourusername/Svitlo-UA-Power-Outages", 
+  "documentation": "https://github.com/yourusername/svitlo_ua", 
   "requirements": [
     "beautifulsoup4>=4.12.0"
   ],
