@@ -1,10 +1,7 @@
 {
-    "name": "Svitlo (DTEK KREM)",
-    "content_in_root": false,
-    "domains": [
-        "svitlo_krem"
-    ],
-    "country": "ua",
-    "homeassistant": "2023.1.0",
-    "render_readme": true
+  "name": "Svitlo.live Schedules",
+  "content_in_root": false,
+  "domains": ["svitlo_live"],
+  "country": "UA",
+  "homeassistant": "2023.5.0"
 }
