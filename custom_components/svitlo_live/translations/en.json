@@ -1,0 +1,28 @@
+{
+  "title": "Svitlo.live",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Select region",
+        "description": "Choose the region for which you want to track power schedule.",
+        "data": {
+          "region": "Region"
+        }
+      },
+      "details": {
+        "title": "Select queue / group",
+        "description": "Select your queue or group for {region}.",
+        "data": {
+          "queue": "Queue / Group"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "This queue is already configured."
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to API.",
+      "unknown": "Unexpected error."
+    }
+  }
+}
