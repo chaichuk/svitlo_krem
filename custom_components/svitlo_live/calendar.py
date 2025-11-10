@@ -22,16 +22,18 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([SvitloCalendar(coordinator)])
+    title = entry.title
+    async_add_entities([SvitloCalendar(coordinator, title)])
 
 
 class SvitloCalendar(CoordinatorEntity, CalendarEntity):
     """Календар відключень світла для конкретного регіону/черги."""
 
-    def __init__(self, coordinator) -> None:
+    def __init__(self, coordinator, title) -> None:
         super().__init__(coordinator)
         self._attr_unique_id = f"svitlo_calendar_{coordinator.region}_{coordinator.queue}"
         self._attr_name = f"Svitlo • {coordinator.region} / {coordinator.queue}"
+        self.summary = f"❌ {title}: Power outage"
         self._event: Optional[CalendarEvent] = None
 
     # ---- обов'язково для стану календаря ----
@@ -146,7 +148,7 @@ class SvitloCalendar(CoordinatorEntity, CalendarEntity):
 
        
         return CalendarEvent(
-            summary="❌ Power outage ❌",
+            summary=self.summary,
             start=start_utc,
             end=end_utc,
             description=f"No electricity {start_local.strftime('%H:%M')}–{end_local.strftime('%H:%M')}",
