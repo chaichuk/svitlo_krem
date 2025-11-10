@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, date
-from typing import Any, Optional
+from datetime import datetime, timedelta, date, time
+from typing import Any, Optional, Callable
 
 import aiohttp
 
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.event import async_track_point_in_time
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_track_point_in_utc_time
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
@@ -48,7 +49,7 @@ class SvitloCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             }
         self._shared_api = shared["_shared_api"]
 
-        self._unsub_precise: Optional[callable] = None
+        self._unsub_precise: Optional[Callable[[], None]] = None
 
         super().__init__(
             hass=hass,
@@ -81,14 +82,14 @@ class SvitloCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 if not should_reuse:
                     try:
-                        async with aiohttp.ClientSession() as session:
-                            async with session.get(API_URL, timeout=30) as resp:
-                                if resp.status != 200:
-                                    raise UpdateFailed(f"HTTP {resp.status} for {API_URL}")
-                                last_json = await resp.json(content_type=None)
-                                shared["last_json"] = last_json
-                                shared["last_json_utc"] = dt_util.utcnow()
-                                _LOGGER.debug("Fetched API once for all entries (%s)", API_URL)
+                        session = async_get_clientsession(self.hass)
+                        async with session.get(API_URL, timeout=30) as resp:
+                            if resp.status != 200:
+                                raise UpdateFailed(f"HTTP {resp.status} for {API_URL}")
+                            last_json = await resp.json(content_type=None)
+                            shared["last_json"] = last_json
+                            shared["last_json_utc"] = dt_util.utcnow()
+                            _LOGGER.debug("Fetched API once for all entries (%s)", API_URL)
                     except Exception as e:
                         raise UpdateFailed(f"Network error: {e}") from e
 
@@ -119,7 +120,6 @@ class SvitloCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         slots_tomorrow_map: dict[str, int] = schedule.get(date_tomorrow) or {}
 
         # >>> НОВА ЛОГІКА nosched:
-        # якщо на сьогодні немає ЖОДНОГО 1 або 2 (тобто лише 0/порожньо) — це «нема розкладу»
         has_any_slots = any(v in (1, 2) for v in slots_today_map.values())
         if not has_any_slots:
             base_day = (
@@ -183,9 +183,9 @@ class SvitloCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         data: dict[str, Any] = {
             "queue": self.queue,
             "date": base_day.isoformat(),
-            "now_status": cur,                       # "on"/"off"/"unknown"
+            "now_status": cur,
             "now_halfhour_index": idx,
-            "next_change_at": next_change_hhmm,      # "HH:MM" (Київ)
+            "next_change_at": next_change_hhmm,
             "today_48half": today_half,
             "updated": dt_util.utcnow().replace(microsecond=0).isoformat(),
             "source": API_URL,
@@ -207,8 +207,16 @@ class SvitloCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # Планувальник точного оновлення
     # ---------------------------------------------------------------------
 
+    def _localize_kyiv(self, d: datetime) -> datetime:
+        """Коректно локалізує naive datetime до Europe/Kyiv з урахуванням DST."""
+        if d.tzinfo is not None:
+            return d.astimezone(TZ_KYIV)
+        localize = getattr(TZ_KYIV, "localize", None)
+        if callable(localize):
+            return localize(d)
+        return d.replace(tzinfo=TZ_KYIV)
+
     def _schedule_precise_refresh(self, data: dict[str, Any]) -> None:
-        # якщо нема розкладу — не плануємо тік
         if data.get("now_status") == "nosched":
             if self._unsub_precise:
                 self._unsub_precise()
@@ -226,12 +234,12 @@ class SvitloCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
 
         try:
-            base_day = datetime.fromisoformat(base_date_iso).date()
             hh, mm = [int(x) for x in next_change_hhmm.split(":")]
+            base_day = datetime.fromisoformat(base_date_iso).date()
 
-            candidate_kyiv = datetime.combine(base_day, datetime.min.time(), tzinfo=TZ_KYIV).replace(
-                hour=hh, minute=mm, second=0, microsecond=0
-            )
+            local_naive = datetime.combine(base_day, time(hour=hh, minute=mm, second=0, microsecond=0))
+            candidate_kyiv = self._localize_kyiv(local_naive)
+
             now_kyiv = dt_util.now(TZ_KYIV)
             if candidate_kyiv <= now_kyiv:
                 candidate_kyiv = candidate_kyiv + timedelta(days=1)
@@ -240,13 +248,15 @@ class SvitloCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             @callback
             def _tick(_now) -> None:
-                self.async_request_refresh()
+                self.hass.async_create_task(self.async_request_refresh())
 
-            self._unsub_precise = async_track_point_in_time(self.hass, _tick, candidate_utc)
+            self._unsub_precise = async_track_point_in_utc_time(self.hass, _tick, candidate_utc)
             _LOGGER.debug(
-                "Scheduled precise local tick (Kyiv) for %s/%s at %s (UTC %s)",
+                "Scheduled precise tick for %s/%s at %s (Kyiv) / %s (UTC)",
                 self.region, self.queue, candidate_kyiv.isoformat(), candidate_utc.isoformat(),
             )
+            _LOGGER.debug("Now UTC: %s", dt_util.utcnow().isoformat())
+
         except Exception as e:
             _LOGGER.debug("Failed to schedule precise refresh: %s", e)
 
