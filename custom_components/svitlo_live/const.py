@@ -44,7 +44,6 @@ REGIONS = {
 
 # Мапа режимів вибору черги/групи
 REGION_QUEUE_MODE = {
-    "vinnitska-oblast": "CHERGA_NUM",
     "chernivetska-oblast": "GRUPA_NUM",
     "donetska-oblast": "GRUPA_NUM",
 }

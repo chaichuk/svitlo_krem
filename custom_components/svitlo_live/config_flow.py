@@ -14,6 +14,12 @@ REGION_UI_LIST: List[str] = list(REGION_SLUG_TO_UI.values())
 REGION_UI_OPTIONS = [{"label": name, "value": name} for name in REGION_UI_LIST]
 
 def _queue_options_for_region(region_slug: str) -> Tuple[List[str], List[Dict[str, str]], str]:
+    if region_slug == "vinnitska-oblast":
+        values = [f"{i}.{j}" for i in range(1, 7) for j in (1, 2)]
+        default = "1.1"
+        options = [{"label": v, "value": v} for v in values]
+        return values, options, default
+
     mode = REGION_QUEUE_MODE.get(region_slug, "DEFAULT")
     if mode == "CHERGA_NUM":
         values = [str(i) for i in range(1, 7)]
