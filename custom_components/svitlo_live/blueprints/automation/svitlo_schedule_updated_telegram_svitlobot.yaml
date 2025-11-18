@@ -1,0 +1,320 @@
+blueprint:
+  name: Svitlo.live region notification (Chat + Svitlobot)
+  description: >-
+    Надсилає push коли розклад електропостачання змінюється в Telegram і оновлює розклад Svitlobot. Необхідно стрворити rest_command.svitlobot_update_schedule
+      rest_command:
+        svitlobot_update_schedule:
+          url: >-
+            https://api.svitlobot.in.ua/website/timetableEditEvent
+            ?channel_key={{ channelKey }}&timetableData={{ timetableData }}
+          method: GET
+          timeout: 30
+  domain: automation
+  source_url: https://github.com/chaichuk/svitlo_live
+
+  input:
+    calendar_entity:
+      name: Календар Svitlo Live
+      description: "Calendar with the Svitlo.live outages for this region/queue."
+      selector:
+        entity:
+          domain: calendar
+          integration: svitlo_live
+
+    schedule_updated_sensor:
+      name: Сенсор оновлення розкладу
+      description: "Оберіть sensor 'Schedule updated' для цього регіону"
+      selector:
+        entity:
+          domain: sensor
+          integration: svitlo_live
+          device_class: timestamp
+
+    storage_helper:
+      name: Helper для збереження
+      description: >
+        Виберіть Text helper для збереження стану цього календаря. Довжина 255 символів.
+        Краще у вигляді svitlo_live_region_queue_schedule
+      selector:
+        entity:
+          domain: input_text
+
+    telegram_storage:
+      name: Helper для збереження Telegram повідомлень
+      description: >
+        Виберіть Text helper для збереження ID останніх Telegram-повідомлень.
+        Краще у вигляді svitlo_live_region_queue_telegram
+      selector:
+        entity:
+          domain: input_text
+
+    svitlobot_storage:
+      name: Helper для збереження Svitlobot розкладу
+      description: "input_text для збереження закодованого тижневого розкладу для Svitlobot."
+      description: >
+        Виберіть Text helper для збереження закодованого тижневого розкладу для Svitlobot.
+        Краще у вигляді svitlo_live_region_queue_svitlobot
+      selector:
+        entity:
+          domain: input_text
+
+    channel_key:
+      name: Svitlobot ключ каналу
+      description: "Channel key для rest_command.svitlobot_update_schedule."
+      selector:
+        text:
+
+    telegram_chat_ids:
+      name: Telegram chat IDs / targets
+      description: "Список chat_id (груп або користувачів), куди відправляти сповіщення."
+      default:
+        - "-1000000000000"
+      selector:
+        object:
+
+    notification_title:
+      name: Заголовок повідомлення
+      description: "Заголовок Telegram-повідомлення."
+      default: "⚠️ Розклад світла змінився!"
+      selector:
+        text:
+
+    time_start:
+      name: Час початку
+      description: "Не надсилати сповіщення раніше цього часу."
+      default: "05:00:00"
+      selector:
+        time:
+
+    time_end:
+      name: Час завершення
+      description: "Не надсилати сповіщення пізніше цього часу."
+      default: "23:40:00"
+      selector:
+        time:
+
+triggers:
+  - trigger: state
+    entity_id: !input schedule_updated_sensor
+
+conditions:
+  - condition: template
+    value_template: "{{ trigger.from_state.state not in ['unknown', 'unavailable'] }}"
+  - condition: time
+    after: !input time_start
+    before: !input time_end
+
+actions:
+  - variables:
+      channelKey: !input channel_key
+      cal_entity: !input calendar_entity
+      storage_helper: !input storage_helper
+      telegram_storage: !input telegram_storage
+      svitlobot_storage: !input svitlobot_storage
+      title_text: !input notification_title
+      region_queue: |
+        {% set parts = cal_entity.split('_') %}
+        {% if parts | length >= 4 %}
+          {{ parts[1] | title }} {{ parts[2] | title }}, черга {{ parts[3:] | join('.') }}
+        {% else %}
+          {{ cal_entity.split('.')[1] | replace('_', ' ') | title }}
+        {% endif %}
+
+  - action: calendar.get_events
+    target:
+      entity_id: "{{ cal_entity }}"
+    data:
+      start_date_time: "{{ today_at('00:00').isoformat() }}"
+      end_date_time: >
+        {{ (today_at('00:00') + timedelta(days=2) - timedelta(seconds=1)).isoformat() }}
+    response_variable: cal_resp
+
+  - variables:
+      raw_events: >
+        {% set r = cal_resp %}
+        {% if r is mapping and cal_entity in r and r[cal_entity] is mapping %}
+          {% set base = r[cal_entity].events | sort(attribute='start') %}
+          [
+          {%- for e in base %}
+            {% set start_local = as_datetime(e.start).astimezone() %}
+            {{ e | combine({'local_date': start_local.date() | string}) }}
+            {%- if not loop.last %},{% endif %}
+          {%- endfor %}
+          ]
+        {% else %}
+          []
+        {% endif %}
+      schedule_signature: |
+        {% set ns = namespace(sig='') %}
+        {% for e in raw_events %}
+          {% set ns.sig = ns.sig ~ as_datetime(e.start).strftime('%y%m%d%H%M') ~ as_datetime(e.end).strftime('%y%m%d%H%M') %}
+        {% endfor %}
+        c={{ raw_events | count }};{{ ns.sig }}
+      old_signature: "{{ states(storage_helper) | default('') }}"
+      changed: "{{ old_signature != '' and schedule_signature[-255:] != old_signature }}"
+
+  - if:
+      - condition: template
+        value_template: "{{ changed }}"
+    then:
+      - variables:
+          ids: |
+            {{ (states(telegram_storage) if states(telegram_storage) not in ['unknown', 'unavailable', 'none', ''] else '[]') | from_json }}
+
+
+      - if:
+          - condition: template
+            value_template: "{{ ids | length > 0 }}"
+        then:
+          - repeat:
+              for_each: "{{ ids }}"
+              sequence:
+                - action: telegram_bot.delete_message
+                  data:
+                    chat_id: "{{ repeat.item[0] }}"
+                    message_id: "{{ repeat.item[1] }}"
+                  continue_on_error: true
+          - action: input_text.set_value
+            target:
+              entity_id: "{{ telegram_storage }}"
+            data:
+              value: "[]"
+        alias: Clear old telegram Schedule message
+
+      - variables:
+          now_dt: "{{ now() }}"
+          today: "{{ now().date() }}"
+          tomorrow: "{{ (now() + timedelta(days=1)).date() }}"
+          today_str: "{{ now().date() | string }}"
+          tomorrow_str: "{{ (now() + timedelta(days=1)).date() | string }}"
+          events_today: >
+            {{ raw_events | selectattr('local_date', 'equalto', today_str) | list }}
+          events_tomorrow: >
+            {{ raw_events | selectattr('local_date', 'equalto', tomorrow_str) | list }}
+          body: |-
+            📅 Сьогодні ({{ now().strftime('%d.%m.%Y') }})
+            {% if events_today -%}
+            {% for e in events_today -%}
+            {% set s1 = as_datetime(e.start).astimezone() -%}
+            {% set e1 = as_datetime(e.end).astimezone() -%}
+            🔻 {{ s1.strftime('%H:%M') }} ━ {{ e1.strftime('%H:%M') }}
+            {% endfor -%}
+            {% else -%}
+            ⚡ світло без відключень
+            {% endif %}
+            {% if events_tomorrow -%}
+            📅 Завтра ({{ (now() + timedelta(days=1)).strftime('%d.%m.%Y') }})
+            {% for e in events_tomorrow -%}
+            {% set s2 = as_datetime(e.start).astimezone() -%}
+            {% set e2 = as_datetime(e.end).astimezone() -%}
+            🔻 {{ s2.strftime('%H:%M') }} ━ {{ e2.strftime('%H:%M') }}
+            {% endfor -%}
+            {% endif -%}
+
+      - action: telegram_bot.send_message
+        data:
+          target: !input telegram_chat_ids
+          title: "{{ title_text }}"
+          message: "{{ body }}"
+          disable_notification: true
+        response_variable: message_id
+
+      - variables:
+          updated_list: >
+            {{ [[ message_id.chats[0].chat_id, message_id.chats[0].message_id ]] }}
+      - action: input_text.set_value
+        target:
+          entity_id: "{{ telegram_storage }}"
+        data:
+          value: "{{ updated_list | tojson }}"
+      - action: input_text.set_value
+        target:
+          entity_id: "{{ storage_helper }}"
+        data:
+          value: "{{ schedule_signature[-255:] }}"
+
+  - if:
+      - condition: template
+        value_template: >-
+          {% if channelKey is defined and channelKey is not none and channelKey != '' %}True{% else %}False{% endif %}
+    then:
+      - variables:
+          week_data: >-
+            {% set today_date_datime = as_datetime(today).date() %}
+            {% set today_idx = today_date_datime.weekday() %}
+            {% set tomorrow_idx = (today_idx + 1) % 7 %}
+
+            {% macro encode_day(day_events, day_date) %}
+              {% set ns = namespace(hours = ['0'] * 24) %}
+              {% set day_start = as_datetime(day_date|string).astimezone().replace(hour=0, minute=0, second=0, microsecond=0) %}
+              {% set day_end = day_start + timedelta(days=1) %}
+              {% for e in day_events %}
+                {% set start_dt = as_datetime(e.start).astimezone() %}
+                {% set end_dt   = as_datetime(e.end).astimezone() %}
+                {% if start_dt < day_start %}{% set start_dt = day_start %}{% endif %}
+                {% if end_dt > day_end %}{% set end_dt = day_end %}{% endif %}
+                {% set start_min = start_dt.hour * 60 + start_dt.minute %}
+                {% set end_min   = end_dt.hour   * 60 + end_dt.minute %}
+                {% if end_min == 0 %}{% set end_min = 1440 %}{% endif %}
+                {% for h in range(0, 24) %}
+                  {% set h_start = h * 60 %}
+                  {% set h_mid   = h * 60 + 30 %}
+                  {% set h_end   = h * 60 + 60 %}
+                  {% set half1 = (start_min < h_mid) and (end_min > h_start) %}
+                  {% set half2 = (start_min < h_end) and (end_min > h_mid) %}
+                  {% set cur = ns.hours[h] %}
+                  {% if half1 and half2 %}
+                    {% if cur != '1' %}
+                      {% set ns.hours = ns.hours[:h] + ['1'] + ns.hours[h+1:] %}
+                    {% endif %}
+                  {% elif half1 %}
+                    {% if cur in ['0', '2'] %}
+                      {% set ns.hours = ns.hours[:h] + ['2'] + ns.hours[h+1:] %}
+                    {% endif %}
+                  {% elif half2 %}
+                    {% if cur in ['0', '3'] %}
+                      {% set ns.hours = ns.hours[:h] + ['3'] + ns.hours[h+1:] %}
+                    {% endif %}
+                  {% endif %}
+                {% endfor %}
+              {% endfor %}
+              {{ ns.hours | join('') | trim }}
+            {% endmacro %}
+            {% set week = ['0' * 24] * 7 %}
+            {% set today_code = encode_day(events_today, today) %}
+            {% set tomorrow_code = encode_day(events_tomorrow, tomorrow) %}
+            {% set week = week[:today_idx] + [today_code] + week[today_idx+1:] %}
+            {% set week = week[:tomorrow_idx] + [tomorrow_code] + week[tomorrow_idx+1:] %}
+            {{ week | join(';') ~ ';' }}
+      - variables:
+          new_week: "{{ week_data | replace('\\n', '') | replace(' ', '') }}"
+          new_week_str: >-
+            {% set old_week = states(svitlobot_storage) | default('') %}
+            {% set old_list = old_week.split(';')[:-1] %}
+            {% set new_list = new_week.split(';')[:-1] %}
+            {% set data = namespace(result=[]) %}
+            {% for i in range(old_list | length) %}
+              {% set old_item = old_list[i] %}
+              {% set new_item = new_list[i] %}
+              {% if '1' in new_item or '2' in new_item or '3' in new_item or
+                    '4' in new_item or '5' in new_item or '6' in new_item or
+                    '7' in new_item or '8' in new_item or '9' in new_item %}
+                {% set chosen = new_item %}
+              {% else %}
+                {% set chosen = old_item %}
+              {% endif %}
+              {% set data.result = data.result + [chosen] %}
+            {% endfor %}
+            {{ data.result | join(';') ~ ';' }}
+      - action: input_text.set_value
+        target:
+          entity_id: "{{ svitlobot_storage }}"
+        data:
+          value: "{{ new_week_str }}"
+      - action: rest_command.svitlobot_update_schedule
+        data:
+          channelKey: "{{ channelKey }}"
+          timetableData: "{{ new_week_str }}"
+    alias: Svitlobot KEY provided
+
+mode: restart
